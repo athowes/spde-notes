@@ -1,0 +1,97 @@
+---
+title: "SPDE approach"
+author: "Adam Howes"
+output: html_document
+bibliography: citations.bib
+---
+
+The solution to certain stochastic partial differential equations (SPDEs) is a Gaussian field with Matérn covariance [@whittle1954stationary].
+@lindgren2010explicit propose to represent a Gaussian field with Matérn covariance as a GMRF by representing the solution of the SPDE using the finite element method.
+The Gaussian field $f(x)$ with the Matérn covariance function is a solution to the linear fractional (since $\alpha \neq 2$) SPDE
+$$
+(\kappa^2 - \Delta)^{\alpha/2} f(x) = \epsilon(x), \quad x \in \mathbb{R}^d, \quad \alpha = \nu + d/2, \quad \kappa > 0, \quad \nu > 0,
+$$
+where $(\kappa^2 - \Delta)^{\alpha/2}$ is a pseduo-differential operator, the innovation process $\epsilon$ is spatial Gaussian white noise with unit variance and $\Delta$ is the Laplacian
+$$
+\Delta = \sum_{i=1}^d \frac{\delta^2}{\delta x_i^2},
+$$
+and the marginal variance is
+$$
+\sigma^2 = \frac{\Gamma(\nu)}{\Gamma(\nu + d/2)(4\pi)^{d/2}\kappa^{2\nu}}
+$$
+
+## @miller2020understanding explanation
+
+SPDE equation:
+
+$$Df = \epsilon$$
+
+where $D$ is a differential operator, $f$ is a funciton and $\epsilon$ is a stochastic process (often white noise).
+This corresponds to the integral form:
+
+$$Df = \epsilon \iff \int Df(x) \phi(x) \text{d}x = \int \epsilon(x) \phi(x) \text{d}x \, \forall \phi$$
+
+where $\phi$ is known as a test function.
+Using the inner product notation $\langle f, g \rangle = \int f(x) g(x) \text{d}x$ this is equivalent to:
+
+$$\langle Df, \phi \rangle = \langle \epsilon, \phi \rangle$$
+
+Solve for points on a mesh $j = 1, \ldots, M$ and $f(x) = \sum_{j = 1}^M \beta_j \psi_j (x)$ then:
+
+$$
+\langle D \sum_{j = 1}^M \beta_j \psi_j, \phi \rangle 
+= \sum_{j = 1}^M \beta_j \langle D \psi_j, \phi \rangle 
+= \langle \epsilon, \phi \rangle
+$$
+
+Test only functions $\phi$ of the form $\sum_{j = 1}^M \beta_j \psi_j (x)$, equivalent to (showing it's equal for all of the basis shows it's equal for any linear combination of them) showing that:
+
+$$
+\sum_{j = 1}^M \beta_j \langle D \psi_j, \psi_i \rangle = \langle \epsilon, \psi_i \rangle \, \forall \psi_i
+$$
+
+This can be written in matrix form as $\mathbf{P} \mathbf{\beta} = \mathbf{e}$ where $P_{i, j}$ is $\langle D \psi_i, \psi_j \rangle$ and $e_j = \langle \epsilon, \psi_j \rangle$.
+The random vector $\mathbf{e} \sim \mathcal{N}(\mathbf{0}, \mathbf{Q}_e ^{-1})$ where the precision has $(i, j)$th entry $\langle \psi_i, \psi_j \rangle$.
+If $\mathbf{P} \mathbf{\beta} \sim \mathcal{N}(\mathbf{0},  \mathbf{Q}_e ^{-1})$ then $\mathbf{\beta} \sim \mathcal{N}(\mathbf{0},  \mathbf{Q})$ where $\mathbf{Q}$ is such that $\mathbf{Q}^{-1} = \mathbf{P} \mathbf{Q}_e^{-1} \mathbf{P}^\top \implies \mathbf{Q} = \mathbf{P}^\top \mathbf{Q}_e \mathbf{P}$ (does $\mathbf{P}^\top \mathbf{P} = I$?).
+
+The steps are to use finite element method to compute $\mathbf{Q}$, then simulate $\tilde \beta$ from the Gaussian, then you have a sample $\tilde f$ from the stochastic process which is a solution to the SPDE.
+
+Need to choose a mesh, grid, triangulation to do the FEM.
+`R-INLA` uses regular grid in 1D, or constrained Delaunay triangulation in 2D to produce a mesh.
+Piecewise linear basis functions (linear B-spline).
+
+## A short introduction on how to fit a SPDE model with INLA (Krainski and Rue)
+
+```{r}
+library(INLA)
+```
+
+Generate fake data:
+
+```{r}
+n <- 200
+coo <- matrix(runif(2 * n), n)
+
+plot(coo[,1], coo[,2])
+```
+
+```{r}
+s2u <- 0.5 # "sigma squared u"
+k <- 10
+r <- 2/k
+
+R <- s2u * exp(-k * as.matrix(dist(coo)))
+
+image(R)
+```
+
+Sample one multivariate Gaussian observation, note that `rnorm(n) %*% chol(R)` is equivalent to `MASS::mvrnorm`:
+
+```{r}
+u <- drop(rnorm(n) %*% chol(R))
+u2 <- MASS::mvrnorm(1, rep(0, n), Sigma = R)
+```
+
+
+
+## Bibliography {-}
