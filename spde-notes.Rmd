@@ -5,6 +5,16 @@ output: html_document
 bibliography: citations.bib
 ---
 
+## List of possible sources
+
+* @miller2020 understanding (recommended by Samir)
+* [Chapter 9](https://www.paulamoraga.com/book-geospatial/) of Geospatial Health Data: Modeling and Visualization with R-INLA and Shiny by Paula Moraga
+* [Most of](https://becarioprecario.bitbucket.io/spde-gitbook/index.html) Advanced Spatial Modeling with Stochastic Partial Differential Equations Using R and INLA by Elias T. Krainski and coauthors
+* [Comment](https://groups.google.com/g/r-inla-discussion-group/c/4tKXemUciGU) on Google group by Finn
+* [Markdown document](https://rstudio-pubs-static.s3.amazonaws.com/302639_3ccd091c277d4d6c9ad9c2cf524250b6.html) by Zhe Sha
+
+## Background
+
 The solution to certain stochastic partial differential equations (SPDEs) is a Gaussian field with Matérn covariance [@whittle1954stationary].
 @lindgren2010explicit propose to represent a Gaussian field with Matérn covariance as a GMRF by representing the solution of the SPDE using the finite element method.
 The Gaussian field $f(x)$ with the Matérn covariance function is a solution to the linear fractional (since $\alpha \neq 2$) SPDE
@@ -60,9 +70,47 @@ Need to choose a mesh, grid, triangulation to do the FEM.
 `R-INLA` uses regular grid in 1D, or constrained Delaunay triangulation in 2D to produce a mesh.
 Piecewise linear basis functions (linear B-spline).
 
+### Connection to basis-penalty smoothing
+
+Assume $f$ to have the form $f(x) = \sum_{j = 1}^M \beta_j \psi_j$.
+Observations give a log-likelihood of $\ell(\beta)$.
+Point estimate $\hat \beta$ leads to function $\hat f$.
+Smoothing penalty $J(\beta, \lambda)$ to give penalised log-likelihood $\ell_p(\beta, \lambda) = \ell(\beta) - J(\beta, \lambda)$.
+Estimate both $\lambda$ and $\beta$ using REML.
+
+Lots of choices for the penalty!
+
+* Second derivative
+* Thin-plate spline (total variation in the gradient of $f$ including the interaction between coordinates). Ends up being $J(\beta, \lambda) = \lambda \int (Df)^2 \text{d} x$ for some $D$ (can also write using inner product). Can also write this in matrix form
+
+You can interpret penalised likelihood as just Bayesian.
+This gets you to the following (improper) prior:
+
+$$
+p(\beta) \propto \text{exp}( - \lambda \beta^\top S \beta)
+$$
+
+This is just a Gaussian with precision $\lambda S$.
+
+Approximate precision matrix for SPDE $Df = \epsilon$ is the same as $\lambda S$ computed using the smoothing penalty $\langle Df, Df, \rangle$.
+
+1. Any SPDE of the form $Df = \epsilon$ can be interpreted instead as a smoothing penalty and vice-versa
+2. Differences in the approaches are differences in implementation only
+
+What smoothing penalty does the Matérn correspond to?
+This one:
+
+$$\tau \int (\kappa^2 f - \Delta f)^2 \text{d} x$$
+
+Trade off between the value of $f$ and the second derivative in each direction.
+Higher $\kappa$ means that $\Delta f$ can be higher without incurring penalty.
+The other parameter $\tau$ controls the overall smoothness.
+Similar question about how distinuishable these are as with lengthscale and noise (probably not very).
+
+
 ## A short introduction on how to fit a SPDE model with INLA (Krainski and Rue)
 
-```{r}
+```{r message=FALSE}
 library(INLA)
 ```
 
@@ -85,13 +133,102 @@ R <- s2u * exp(-k * as.matrix(dist(coo)))
 image(R)
 ```
 
-Sample one multivariate Gaussian observation, note that `rnorm(n) %*% chol(R)` is equivalent to `MASS::mvrnorm`:
+Sample one multivariate Gaussian observation (note that `rnorm(n) %*% chol(R)` is equivalent to `MASS::mvrnorm`):
 
 ```{r}
 u <- drop(rnorm(n) %*% chol(R))
 u2 <- MASS::mvrnorm(1, rep(0, n), Sigma = R)
+
+plot(u)
+points(u2, add = TRUE, col = "red")
 ```
 
+Add a covariate effect and noise (nugget) terms:
 
+```{r}
+x <- runif(n)
+beta <- 1:2
+s2e <- 0.2 # "sigma squared e"
+lin.pred <- beta[1] + beta[2] * x + u # "linear predictor"
+e <- rnorm(n, 0, sqrt(s2e)) # "noise"
+y <- lin.pred + e
+```
+
+Mesh:
+
+```{r}
+mesh <- inla.mesh.2d(
+  coo, 
+  cutoff = r/10, 
+  max.edge = c(r/4, r/2),
+  offset = c(r/2, r)
+)
+
+plot(mesh, asp = 1)
+points(coo, col = "red")
+```
+
+Question as to if all of the points lie at verticies?
+It doesn't look like it, but most of them are.
+
+Create the projection matrix `A`:
+
+```{r}
+A <- inla.spde.make.A(mesh = mesh, loc = coo)
+class(A)
+```
+
+`A` is a $200 \times 1740$ sparse Matrix.
+Where do the dimensions come from?
+200 is the number of data points, what about the 1740?
+I'd guess the number of mesh points but it's not exactly right:
+
+```{r}
+mesh$n
+```
+
+Set-up the SPDE:
+
+```{r}
+spde <- inla.spde2.pcmatern(
+  mesh = mesh,
+  alpha = 1.5,
+  prior.range = c(0.2, 0.5), # P(range < 0.2) = 0.5
+  prior.sigma = c(1, 0.5)    # P(sigma > 1) = 0.5
+)
+```
+
+```{r}
+stk.e <- inla.stack(
+  tag = "est",
+  data = list(y = y),
+  A = list(1, A),
+  effects = list(
+    data.frame(b0 = 1, x = x),
+    idx.u = 1:spde$n.spde)
+)
+
+pcprec <- list(
+  hyper = list(theta = list(prior = "pc.prec", param = c(1, 0.1)))
+)
+
+mf <- y ~ 0 + b0 + x + f(idx.u, model = spde)
+
+res <- inla(
+  mf, 
+  control.family = pcprec,
+  data = inla.stack.data(stk.e),
+  control.predictor = list(compute = TRUE, A = inla.stack.A(stk.e))
+)
+
+round(res$summary.fixed, 4)
+
+pmd.s2e <- inla.tmarginal(
+  function(x) sqrt(1/x), 
+  res$marginals.hyperpar$`Precision for the Gaussian observations`
+)
+
+plot(pmd.s2e, type = "l", ylab = "Density", xlab = expression(sigma[e]))
+```
 
 ## Bibliography {-}
